@@ -122,3 +122,8 @@ async def compare_ocr(
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         filename=report_file
     )
+
+
+@app.get("/")
+async def root():
+    return {"message": "OCR Compare API is running. Use POST /compare."}
