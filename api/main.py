@@ -3,8 +3,8 @@ import pandas as pd
 import difflib
 import requests
 import io
-import uvicorn
 from docx import Document
+from fastapi.responses import FileResponse
 
 app = FastAPI()
 
@@ -13,7 +13,6 @@ def classify_discrepancy(gt_text, ocr_line, score):
     gt_upper = str(gt_text).upper()
     ocr_upper = str(ocr_line).upper()
 
-    # Discrepancy type & details
     if any(sym in gt_text for sym in ["¹", "²"]) and ("?" in ocr_line or "?" in gt_text):
         discrepancy_type = "Symbol mismatch / line-structure difference"
         details = "Footnote marker ¹ appears as ? in image OCR; placement differs."
@@ -27,7 +26,6 @@ def classify_discrepancy(gt_text, ocr_line, score):
         discrepancy_type = "Minor formatting difference"
         details = "Formatting or spacing mismatch."
 
-    # Category
     if "NITROGEN" in gt_upper or "NUTRIENT" in gt_upper:
         category = "Nutrient declaration"
     elif "INGREDIENT" in gt_upper or "CMC" in gt_upper:
@@ -39,12 +37,7 @@ def classify_discrepancy(gt_text, ocr_line, score):
     else:
         category = "General"
 
-    # Severity
-    if category in ["Nutrient declaration", "Ingredients / footnote"]:
-        severity = "Critical"
-    else:
-        severity = "Low"
-
+    severity = "Critical" if category in ["Nutrient declaration", "Ingredients / footnote"] else "Low"
     return discrepancy_type, details, category, severity
 
 
@@ -80,14 +73,12 @@ async def compare_ocr(
     csv_url: str = Form(...),
     ocr_text: str = Form(...)
 ):
-    # Step 1: Download file
     response = requests.get(csv_url)
     if response.status_code != 200:
         return {"error": f"Failed to fetch file from {csv_url}"}
 
     file_bytes = io.BytesIO(response.content)
 
-    # Step 2: Try Excel first, fallback to CSV
     try:
         df = pd.read_excel(file_bytes, header=2, engine="openpyxl")
     except Exception:
@@ -97,22 +88,19 @@ async def compare_ocr(
         except Exception as e2:
             return {"error": f"Could not parse file as Excel or CSV. Details: {str(e2)}"}
 
-    # Drop row 4 (language codes)
     if 0 in df.index:
         df = df.drop(index=0)
 
-    # Step 3: Split OCR text into lines
     ocr_lines = [line.strip() for line in ocr_text.splitlines() if line.strip()]
 
     report_rows = []
     discrepancy_id = 1
 
-    # Step 4: Compare line-by-line
     for lang in df.columns:
         for gt_text in df[lang].dropna():
             for ocr_line in ocr_lines:
                 score = difflib.SequenceMatcher(None, ocr_line, str(gt_text)).ratio()
-                if score < 0.95:  # mismatch threshold
+                if score < 0.95:
                     discrepancy_type, details, category, severity = classify_discrepancy(gt_text, ocr_line, score)
                     report_rows.append({
                         "Language": lang,
@@ -126,11 +114,11 @@ async def compare_ocr(
                     })
                     discrepancy_id += 1
 
-    # Step 5: Save DOCX report
     report_file = save_report_doc(report_rows)
 
-    return {"message": "Report generated", "rows": len(report_rows), "file": report_file}
-
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Return the DOCX file directly
+    return FileResponse(
+        report_file,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        filename=report_file
+    )
