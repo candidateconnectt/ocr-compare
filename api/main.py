@@ -5,11 +5,11 @@ import requests
 import io
 from docx import Document
 from fastapi.responses import FileResponse
+import uuid
 
 app = FastAPI()
 
 def classify_discrepancy(gt_text, ocr_line, score):
-    """Rule-based classification of discrepancy type, details, category, severity."""
     gt_upper = str(gt_text).upper()
     ocr_upper = str(ocr_line).upper()
 
@@ -41,8 +41,9 @@ def classify_discrepancy(gt_text, ocr_line, score):
     return discrepancy_type, details, category, severity
 
 
-def save_report_doc(report_rows, filename="discrepancy_report.docx"):
-    """Generate DOCX report in the required format."""
+def save_report_doc(report_rows):
+    """Generate DOCX report with a unique filename."""
+    filename = f"discrepancy_report_{uuid.uuid4().hex}.docx"
     doc = Document()
     doc.add_heading("Discrepancy Report", level=1)
 
@@ -69,59 +70,60 @@ def save_report_doc(report_rows, filename="discrepancy_report.docx"):
 
 
 @app.post("/compare")
-async def compare_ocr(
-    csv_url: str = Form(...),
-    ocr_text: str = Form(...)
-):
-    response = requests.get(csv_url)
-    if response.status_code != 200:
-        return {"error": f"Failed to fetch file from {csv_url}"}
-
-    file_bytes = io.BytesIO(response.content)
-
+async def compare_ocr(csv_url: str = Form(...), ocr_text: str = Form(...)):
     try:
-        df = pd.read_excel(file_bytes, header=2, engine="openpyxl")
-    except Exception:
-        file_bytes.seek(0)
+        response = requests.get(csv_url)
+        if response.status_code != 200:
+            return {"error": f"Failed to fetch file from {csv_url}. Status: {response.status_code}"}
+
+        file_bytes = io.BytesIO(response.content)
+
+        # Try Excel first
         try:
-            df = pd.read_csv(file_bytes, header=2)
-        except Exception as e2:
-            return {"error": f"Could not parse file as Excel or CSV. Details: {str(e2)}"}
+            df = pd.read_excel(file_bytes, header=0, engine="openpyxl")
+        except Exception as e1:
+            file_bytes.seek(0)
+            try:
+                df = pd.read_csv(file_bytes, header=0)
+            except Exception as e2:
+                return {"error": f"Could not parse file. Excel error: {str(e1)}, CSV error: {str(e2)}"}
 
-    if 0 in df.index:
-        df = df.drop(index=0)
+        if 0 in df.index:
+            df = df.drop(index=0)
 
-    ocr_lines = [line.strip() for line in ocr_text.splitlines() if line.strip()]
+        ocr_lines = [line.strip() for line in ocr_text.splitlines() if line.strip()]
 
-    report_rows = []
-    discrepancy_id = 1
+        report_rows = []
+        discrepancy_id = 1
 
-    for lang in df.columns:
-        for gt_text in df[lang].dropna():
-            for ocr_line in ocr_lines:
-                score = difflib.SequenceMatcher(None, ocr_line, str(gt_text)).ratio()
-                if score < 0.95:
-                    discrepancy_type, details, category, severity = classify_discrepancy(gt_text, ocr_line, score)
-                    report_rows.append({
-                        "Language": lang,
-                        "#": f"{lang} {discrepancy_id}.",
-                        "Discrepancy Type": discrepancy_type,
-                        "Discrepancy Details": details,
-                        "Excel Text (Approved)": str(gt_text),
-                        "Image Text (Printed)": str(ocr_line),
-                        "Category": category,
-                        "Severity": severity
-                    })
-                    discrepancy_id += 1
+        for lang in df.columns:
+            for gt_text in df[lang].dropna():
+                for ocr_line in ocr_lines:
+                    score = difflib.SequenceMatcher(None, ocr_line, str(gt_text)).ratio()
+                    if score < 0.95:
+                        discrepancy_type, details, category, severity = classify_discrepancy(gt_text, ocr_line, score)
+                        report_rows.append({
+                            "Language": lang,
+                            "#": f"{lang} {discrepancy_id}.",
+                            "Discrepancy Type": discrepancy_type,
+                            "Discrepancy Details": details,
+                            "Excel Text (Approved)": str(gt_text),
+                            "Image Text (Printed)": str(ocr_line),
+                            "Category": category,
+                            "Severity": severity
+                        })
+                        discrepancy_id += 1
 
-    report_file = save_report_doc(report_rows)
+        report_file = save_report_doc(report_rows)
 
-    # Return the DOCX file directly
-    return FileResponse(
-        report_file,
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        filename=report_file
-    )
+        return FileResponse(
+            report_file,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            filename=report_file
+        )
+
+    except Exception as e:
+        return {"error": f"Unexpected error: {str(e)}"}
 
 
 @app.get("/")
