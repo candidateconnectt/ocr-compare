@@ -4,8 +4,7 @@ import difflib
 import requests
 import io
 from docx import Document
-from fastapi.responses import FileResponse
-import uuid
+from fastapi.responses import StreamingResponse
 
 app = FastAPI()
 
@@ -41,9 +40,9 @@ def classify_discrepancy(gt_text, ocr_line, score):
     return discrepancy_type, details, category, severity
 
 
-def save_report_doc(report_rows):
-    """Generate DOCX report with a unique filename."""
-    filename = f"discrepancy_report_{uuid.uuid4().hex}.docx"
+def generate_report_doc(report_rows):
+    """Generate DOCX report in memory and return as BytesIO."""
+    file_stream = io.BytesIO()
     doc = Document()
     doc.add_heading("Discrepancy Report", level=1)
 
@@ -65,8 +64,9 @@ def save_report_doc(report_rows):
         row_cells[6].text = row["Category"]
         row_cells[7].text = row["Severity"]
 
-    doc.save(filename)
-    return filename
+    doc.save(file_stream)
+    file_stream.seek(0)
+    return file_stream
 
 
 @app.post("/compare")
@@ -114,12 +114,12 @@ async def compare_ocr(csv_url: str = Form(...), ocr_text: str = Form(...)):
                         })
                         discrepancy_id += 1
 
-        report_file = save_report_doc(report_rows)
+        report_stream = generate_report_doc(report_rows)
 
-        return FileResponse(
-            report_file,
+        return StreamingResponse(
+            report_stream,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            filename=report_file
+            headers={"Content-Disposition": "attachment; filename=discrepancy_report.docx"}
         )
 
     except Exception as e:
